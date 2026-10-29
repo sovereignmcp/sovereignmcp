@@ -1,0 +1,12 @@
+.git
+.github
+**/__pycache__
+*.pyc
+*.db
+data/
+venv/
+.venv/
+.env
+policy.yaml
+egress_secret
+tests/
