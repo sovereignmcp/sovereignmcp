@@ -1,0 +1,24 @@
+# Local DEMO stack: the gateway plus a fake, deliberately trusting MCP server.
+# For real use, run only the `gateway` service with your own policy (see README).
+services:
+  gateway:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      SOVEREIGN_UPSTREAM: http://target:8001/mcp
+      SOVEREIGN_AUDIT_KEY: ${SOVEREIGN_AUDIT_KEY:-demo-audit-key-do-not-use-in-production}
+      SOVEREIGN_ALLOW_DEMO_TOKENS: "1"          # demo only: the example policy uses public demo tokens
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ./examples/policy.example.yaml:/config/policy.yaml:ro
+      - gateway-data:/data
+    depends_on: [target]
+
+  target:
+    build: .
+    command: ["uvicorn", "mock_mcp_server:app", "--app-dir", "/examples", "--host", "0.0.0.0", "--port", "8001"]
+    volumes:
+      - ./examples:/examples:ro
+
+volumes:
+  gateway-data:

@@ -1,0 +1,59 @@
+# EXAMPLE policy with PUBLIC DEMO tokens (demo-intern-token, demo-manager-token, demo-cto-token).
+# `sovereignmcp serve` refuses to run with these unless --demo / SOVEREIGN_ALLOW_DEMO_TOKENS=1.
+# For real use run `sovereignmcp init` to get a policy with a random token.
+shadow_mode: false            # true = log what WOULD be blocked, block nothing
+upstream_url: "http://127.0.0.1:8001/mcp"   # env SOVEREIGN_UPSTREAM overrides
+approval_ttl_minutes: 15
+sql_dialect: null             # e.g. postgres, mysql, sqlite
+default_agent: alpha_assistant
+audit_roles: [manager, admin]
+
+users:
+  - id: user_482
+    name: Rohan
+    role: intern
+    manager: user_101
+    slack: "@rohan"
+    token_sha256: "3acb2652b12e5c027f7950192beb00736318498ad249e4d2bb631c10ed45c908"
+    allowed_tools: [read_metrics, run_sql, update_user, run_command, fetch_url]
+
+  - id: user_101
+    name: Priya
+    role: manager
+    manager: user_900
+    slack: "@priya"
+    token_sha256: "0fc12e1d3501754c2c2d877dcbe25174a2fb9d6ce461b48f067d3a99a54d81fa"
+    allowed_tools: [read_metrics, run_sql, update_user, delete_database, run_command, fetch_url]
+    # slack_user_id: "U0123ABCD"   # needed for Slack approvals (see README)
+
+  - id: user_900
+    name: Sam
+    role: admin
+    slack: "@sam_cto"
+    token_sha256: "47b28763a8b8fde998db1ca59affac5a0434cab9e1e8d84214bbb7d2719a3e42"
+    allowed_tools: ["*"]
+
+# What the AI agent itself may do. Allowed = the person's tools AND the agent's tools (Intersection Rule).
+agents:
+  alpha_assistant:
+    allowed_tools: [read_metrics, run_sql, update_user, delete_database, run_command, fetch_url]
+
+tool_rules:
+  delete_database:
+    requires_approval: true
+  update_user:
+    forbidden_arg_values:
+      role: [admin, superadmin, root]
+  run_sql:
+    sql_inspect: true
+    sql_arg: query
+  run_command:
+    command_inspect: true
+    command_arg: command
+  fetch_url:
+    url_inspect: true
+    url_arg: url
+
+# Optional, for the Slack approval bot (see README):
+# approval_bridge:
+#   token_sha256: "<sha256 of the bot's SOVEREIGN_BRIDGE_TOKEN>"
