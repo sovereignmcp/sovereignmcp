@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-*.db
-data/
-venv/
-.env
-policy.yaml
-egress_secret
