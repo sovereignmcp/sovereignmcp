@@ -1,0 +1,47 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No pasted chat artifacts or code fences in non-markdown files
+        run: |
+          if git grep -nE '\[cite' -- . ':(exclude)*.md' ':(exclude).github/workflows/ci.yml'; then echo "stray [cite] markers found"; exit 1; fi
+          if git grep -nE '^```' -- . ':(exclude)*.md' ':(exclude).github/workflows/ci.yml'; then echo "stray code fences found"; exit 1; fi
+      - name: No obvious secrets
+        run: |
+          if git grep -nE 'xox[bap]-[0-9A-Za-z-]{10,}|xapp-[0-9A-Za-z-]{10,}|BEGIN [A-Z ]*PRIVATE KEY' -- . ':(exclude).github/workflows/ci.yml'; then echo "possible secret found"; exit 1; fi
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { python-version: ["3.10", "3.11", "3.12"] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python-version }}" }
+      - run: pip install -e ".[dev]"
+      - run: python -m unittest discover -s tests -t . -v
+
+  docker-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the demo stack
+        run: docker compose up --build -d
+      - name: Wait for the gateway
+        run: |
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:8000/healthz && exit 0; sleep 2; done
+          docker compose logs; exit 1
+      - name: Run the end-to-end demo (every step must pass)
+        run: |
+          pip install httpx
+          python examples/demo_client.py
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+      - run: docker compose down -v
