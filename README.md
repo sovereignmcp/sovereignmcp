@@ -1,10 +1,18 @@
 # SovereignMCP
 
+[![CI](https://github.com/sovereignmcp/sovereignmcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sovereignmcp/sovereignmcp/actions/workflows/ci.yml)
+![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)
+![Status](https://img.shields.io/badge/status-alpha-orange)
+
 **A zero-trust gateway for AI agent tool calls.** It sits between an AI assistant and your internal
 [MCP](https://modelcontextprotocol.io) servers, so an agent can only do what the *specific person* using it is allowed to do,
 risky calls wait for a human, and every decision lands in a tamper-evident audit log on your own machine.
 
 > **Status: alpha.** Tested with Cursor and a mock MCP server. Not independently audited. Read [Limits](#limits) before relying on it.
+
+<!-- After you record it (see docs/RECORDING_THE_DEMO.md), uncomment this line:
+![60-second demo](docs/demo.gif)
+-->
 
 ## The problem
 
@@ -26,6 +34,16 @@ manager, and the log says exactly who asked for what.
 - **Human approval.** Risky calls return "NOT EXECUTED, pending" immediately. Only the routed manager can approve (never the requester). The requester then repeats the identical call and it runs once. Approvals expire and are bound to the exact arguments.
 - **Tamper-evident audit.** Hash-chained SQLite log, optionally HMAC-keyed, secrets redacted, written *before* a call is forwarded.
 - **Shadow mode.** Log what *would* be blocked without blocking anything. A safe way to start.
+
+## How it differs
+
+Other projects cover parts of this space, for example MCP Zero Trust Layer, hoop.dev, and commercial gateways such as MintMCP and Runlayer.
+We have not benchmarked against them, so read their docs too. SovereignMCP's focus:
+
+- **Your data stays home.** The optional cloud mode sends only a closed-schema metadata message, and a canary test fails if payload data ever leaks into it.
+- **Approvals go to the person's own manager,** are bound to the exact arguments, single use, expiring, and (in cloud mode) Ed25519-signed and re-checked locally.
+- **Argument inspection is built in:** privilege escalation, SQL, shell commands and SSRF.
+- **Tamper-evident audit** on your own machine, written before a call is forwarded.
 
 ## Quickstart (60 seconds, demo)
 
@@ -88,7 +106,7 @@ The bot never holds a manager's token. It reports *who clicked* (Slack's own use
 
 ## Hybrid mode (optional, outbound-only)
 
-A hosted control plane can broker approvals while your data stays home. The gateway dials **out** over HTTPS; nothing connects in. What leaves is a
+**Design preview.** The gateway side is built and tested against a mock cloud (`examples/mock_cloud.py`); a hosted control plane is not live yet. The design: a hosted control plane can broker approvals while your data stays home. The gateway dials **out** over HTTPS; nothing connects in. What leaves is a
 strict, closed-schema metadata message (tool, risk tier, reason code, coarse SQL shape, a *keyed* hash of the arguments), never the arguments,
 results, tokens or URLs. Decisions come back **Ed25519-signed** and are checked against a pinned public key, matched to a local approval and
 re-checked by the local approval engine before anything runs. The wire contract is in [`src/sovereignmcp/cloud/contract.py`](src/sovereignmcp/cloud/contract.py),
@@ -106,6 +124,16 @@ Please read these. A security tool should be honest about what it does not do.
 - **Streaming:** only JSON responses are filtered; streamed `tools/list` replies are refused in enforce mode. JSON-RPC batches are rejected.
 - **Tokens** are static hashes: no expiry or SSO yet.
 
+## Roadmap
+
+Planned, no dates:
+
+- Hosted control plane: approvals inbox, signed policy distribution, audit anchoring and export
+- Email guard: a `send_email` inspector (recipient domains, attachments, secrets and PII, bulk sends) with a message preview in the approval
+- SSO and token expiry; binding agent identity to a credential
+- Streaming (SSE) support
+- PyPI package and a Docker image on GHCR
+
 ## License
 
 SovereignMCP is **source-available** under the [PolyForm Shield License 1.0.0](LICENSE) (not an OSI "open source" license).
@@ -114,4 +142,4 @@ including hosted or managed versions. There is no automatic conversion to anothe
 
 ## Contributing and security
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). What we defend, assume and do not cover: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md). Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).

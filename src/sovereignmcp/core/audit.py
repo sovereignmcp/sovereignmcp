@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import threading
 from contextlib import closing
@@ -13,14 +14,60 @@ GENESIS = "0" * 64
 SENSITIVE = ("password", "secret", "token", "api_key", "apikey", "authorization", "credit_card", "ssn")
 
 
+MASK = "***REDACTED***"
+
+# Secrets that appear inside VALUES (a curl command, a SQL string, a URL), not just under a "password" key.
+_VALUE_PATTERNS = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"), MASK),
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.I), "Bearer " + MASK),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), MASK),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), MASK),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), MASK),
+    (re.compile(r"\bxapp-[A-Za-z0-9-]{10,}"), MASK),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"), MASK),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}"), MASK),
+    (re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}"), MASK),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"), MASK),
+    (re.compile(r"(://[^/\s:@]+:)[^/\s@]+(@)"), r"\1" + MASK + r"\2"),
+    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)\b([\"']?\s*[=:]\s*[\"']?)([^\s\"',;)]+)"),
+     r"\1\2" + MASK),
+]
+_CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
+
+
+def luhn_ok(digits: str) -> bool:
+    total, flip = 0, False
+    for ch in reversed(digits):
+        d = int(ch)
+        if flip:
+            d = d * 2 - 9 if d * 2 > 9 else d * 2
+        total += d
+        flip = not flip
+    return total % 10 == 0
+
+
+def scrub(text: str) -> str:
+    """Removes secret-looking values from free text. Best effort: a safety net, not a guarantee."""
+    for rx, repl in _VALUE_PATTERNS:
+        text = rx.sub(repl, text)
+
+    def card(m):
+        digits = re.sub(r"\D", "", m.group(0))
+        return "[CARD REDACTED]" if 13 <= len(digits) <= 19 and luhn_ok(digits) else m.group(0)
+
+    return _CARD.sub(card, text)
+
+
 def redact(obj):
     if isinstance(obj, dict):
         return {
-            k: "***REDACTED***" if any(s in str(k).lower() for s in SENSITIVE) else redact(v)
+            k: MASK if any(s in str(k).lower() for s in SENSITIVE) else redact(v)
             for k, v in obj.items()
         }
     if isinstance(obj, list):
         return [redact(i) for i in obj]
+    if isinstance(obj, str):
+        return scrub(obj)
     return obj
 
 

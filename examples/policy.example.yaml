@@ -57,3 +57,18 @@ tool_rules:
 # Optional, for the Slack approval bot (see README):
 # approval_bridge:
 #   token_sha256: "<sha256 of the bot's SOVEREIGN_BRIDGE_TOKEN>"
+
+# ---- Hardening switches (all optional) -------------------------------------------------------
+# Protocol methods other than tools/* are DENIED by default (resources/read, prompts/get, ...).
+# Opt in only to what you have reviewed; "resources/read" lets agents read resources WITHOUT tool policy:
+# allowed_methods: ["resources/list"]
+#
+# Agent identity must not be self-declared. Give an agent a credential (sha256 of a long random secret,
+# see `sovereignmcp hash-token`) and callers must send it as the X-Agent-Key header:
+# agents:
+#   alpha_assistant:
+#     token_sha256: "<hash>"
+# require_agent_credentials: true     # refuse any agent that has no credential
+#
+# Environment: SOVEREIGN_UPSTREAM_AUTH="Bearer <secret>" makes the gateway authenticate to your MCP server,
+# so the server can refuse anyone who bypasses the gateway. SOVEREIGN_MAX_BODY (bytes, default 1000000).

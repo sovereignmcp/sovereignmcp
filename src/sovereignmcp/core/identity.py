@@ -9,10 +9,11 @@ import yaml
 
 
 class AuthError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, log: bool = True):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        self.log = log          # whether this counts as (and is audited as) a failed authentication
 
 
 def sha256_hex(value: str) -> str:
@@ -106,6 +107,15 @@ class IdentityEngine:
         agent = self._policy.get("agents", {}).get(agent_id)
         if agent is None:
             raise AuthError(403, f"Unregistered agent: {agent_id}")
+        # Agent identity must not be self-declared. If the agent has a credential, the caller must prove it,
+        # otherwise a person could simply pick the most permissive agent.
+        agent_hash = (agent.get("token_sha256") or "").lower()
+        if agent_hash:
+            presented = headers.get("x-agent-key", "")
+            if not presented or not hmac.compare_digest(sha256_hex(presented.strip()), agent_hash):
+                raise AuthError(403, "Invalid or missing agent credential")
+        elif self._policy.get("require_agent_credentials"):
+            raise AuthError(403, "This agent has no credential configured but require_agent_credentials is on")
 
         manager = self._by_id.get(user.get("manager")) or {}
         return {
@@ -121,6 +131,7 @@ class IdentityEngine:
             "shadow_mode": self.shadow_mode,
             "tool_rules": self._policy.get("tool_rules", {}),
             "sql_dialect": self._policy.get("sql_dialect"),
+            "allowed_methods": self._policy.get("allowed_methods", []),
             "approval_ttl": int(self._policy.get("approval_ttl_minutes", 15)),
             "audit_roles": self._policy.get("audit_roles", ["manager", "admin"]),
         }

@@ -11,7 +11,11 @@ from fastapi.responses import JSONResponse, Response
 from sovereignmcp.core.approvals import ApprovalEngine
 from sovereignmcp.core.audit import AuditVault
 from sovereignmcp.core.identity import AuthError, IdentityEngine
+from sovereignmcp.core.methods import method_decision
 from sovereignmcp.core.notify import notify_approval
+from sovereignmcp.core.ratelimit import FailureLimiter
+from sovereignmcp.core.safejson import UnsafeJSON, strict_loads
+from sovereignmcp.core.sessions import SessionBinder
 from sovereignmcp.plugins.inspector import PayloadInspector
 
 POLICY_PATH = os.getenv("SOVEREIGN_POLICY", "policy.yaml")
@@ -21,6 +25,9 @@ identity = IdentityEngine(POLICY_PATH)
 audit = AuditVault(DB_PATH)
 approvals = ApprovalEngine(DB_PATH)
 
+MAX_BODY = int(os.getenv("SOVEREIGN_MAX_BODY", "1000000"))      # bytes; larger requests get 413
+sessions = SessionBinder()           # MCP session id -> the person who initialized it
+auth_failures = FailureLimiter()     # blocks and caps logging of repeated failed logins per source address
 FORWARD_HEADERS = ("content-type", "accept", "mcp-session-id", "mcp-protocol-version")
 client: httpx.AsyncClient
 cloud_agent = None          # set only when SOVEREIGN_CLOUD_URL is configured
@@ -72,9 +79,42 @@ async def lifespan(_app):
 app = FastAPI(title="SovereignMCP Gateway", lifespan=lifespan)
 
 
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def authenticate(request: Request) -> dict:
+    """Every endpoint authenticates through here, so repeated failures from one source get blocked."""
+    if auth_failures.blocked(client_ip(request)):
+        raise AuthError(429, "Too many failed attempts; try again later", log=False)
+    return identity.authenticate(request.headers)
+
+
 @app.exception_handler(AuthError)
-async def auth_error_handler(_request: Request, exc: AuthError):
-    return JSONResponse({"error": exc.detail}, status_code=exc.status)
+async def auth_error_handler(request: Request, exc: AuthError):
+    headers = {}
+    if exc.status in (401, 403) and exc.log:
+        ip = client_ip(request)
+        if auth_failures.record(ip):          # capped, so an attacker can't flood the audit log
+            await asyncio.to_thread(audit.log_event, f"anonymous:{ip}", "unauthenticated", "-", "auth", "-", {},
+                                    "AUTH_FAILED", exc.detail)
+    if exc.status == 429:
+        headers["Retry-After"] = str(auth_failures.retry_after(client_ip(request)))
+    return JSONResponse({"error": exc.detail}, status_code=exc.status, headers=headers)
+
+
+async def read_limited(request: Request, limit: int):
+    """Reads the body but gives up (returns None) as soon as it exceeds `limit` bytes."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        return None
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # ---------------------------------------------------------------- helpers
@@ -99,6 +139,9 @@ async def call_upstream(request: Request, ctx: dict, body: dict) -> httpx.Respon
     headers = {k: v for k, v in request.headers.items() if k.lower() in FORWARD_HEADERS}
     headers["x-sovereign-user"] = ctx["user_id"]
     headers["x-sovereign-agent"] = ctx["agent_id"]
+    upstream_auth = os.getenv("SOVEREIGN_UPSTREAM_AUTH")        # e.g. "Bearer <secret only the gateway knows>"
+    if upstream_auth:
+        headers["authorization"] = upstream_auth                # lets the MCP server refuse anyone who bypasses the gateway
     return await client.post(identity.upstream_url, json=body, headers=headers)
 
 
@@ -110,22 +153,44 @@ def relay(r: httpx.Response) -> Response:
 # ---------------------------------------------------------------- MCP endpoint
 @app.post("/mcp")
 async def mcp_gateway(request: Request):
-    ctx = identity.authenticate(request.headers)
+    ctx = authenticate(request)
+    raw = await read_limited(request, MAX_BODY)
+    if raw is None:
+        return JSONResponse({"error": "request too large"}, status_code=413)
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        body = strict_loads(raw)           # refuses duplicate keys: no parser differential with the upstream server
+    except (UnsafeJSON, ValueError):
+        return JSONResponse({"error": "invalid or ambiguous JSON"}, status_code=400)
     if not isinstance(body, dict):  # JSON-RPC batches: fail closed for now
         return JSONResponse({"error": "batch requests are not supported"}, status_code=400)
 
+    # A session id is only valid for the person it was issued to.
+    session_id = request.headers.get("mcp-session-id")
+    if session_id and not sessions.check(session_id, ctx["user_id"]):
+        await alog(ctx, "session", "-", {}, "BLOCKED", "Unknown or foreign MCP session id")
+        return JSONResponse({"error": "session not found, please re-initialize"}, status_code=404)
+
     method = body.get("method", "")
+    route = method_decision(method, ctx["allowed_methods"])
+    if route == "deny":
+        label = str(method)[:64]
+        if not ctx["shadow_mode"]:
+            await alog(ctx, label, "-", {}, "BLOCKED", "Method is not permitted by policy (default deny)")
+            if "id" not in body:                      # a notification: nothing to answer
+                return Response(status_code=202)
+            return rpc_error(body.get("id"), -32001, f"Method '{label}' is not permitted by policy")
+        await alog(ctx, label, "-", {}, "SHADOW_WOULD_BLOCK", "Method is not permitted by policy (default deny)")
+
     try:
         if method == "tools/call":
             return await handle_tools_call(request, ctx, body)
         if method == "tools/list":
             return await handle_tools_list(request, ctx, body)
-        # initialize, ping, notifications, etc. pass straight through (session header preserved)
-        return relay(await call_upstream(request, ctx, body))
+        # initialize, ping, notifications and explicitly allowed methods pass through
+        r = await call_upstream(request, ctx, body)
+        if method == "initialize" and r.headers.get("mcp-session-id"):
+            sessions.bind(r.headers["mcp-session-id"], ctx["user_id"])
+        return relay(r)
     except httpx.HTTPError as exc:
         return rpc_error(body.get("id"), -32000, f"Upstream MCP server unreachable: {type(exc).__name__}")
 
@@ -219,13 +284,13 @@ async def handle_tools_call(request, ctx, body):
 # ---------------------------------------------------------------- approvals
 @app.get("/approvals/pending")
 async def pending(request: Request):
-    ctx = identity.authenticate(request.headers)
+    ctx = authenticate(request)
     return {"pending": await asyncio.to_thread(approvals.pending_for, ctx["user_id"])}
 
 
 @app.get("/approvals/{approval_id}")
 async def approval_status(approval_id: str, request: Request):
-    ctx = identity.authenticate(request.headers)
+    ctx = authenticate(request)
     rec = await asyncio.to_thread(approvals.get, approval_id)
     if not rec or ctx["user_id"] not in (rec["requester_id"], rec["manager_id"]):
         return JSONResponse({"error": "approval not found"}, status_code=404)
@@ -234,7 +299,7 @@ async def approval_status(approval_id: str, request: Request):
 
 @app.post("/approvals/{approval_id}/decide")
 async def decide(approval_id: str, request: Request):
-    ctx = identity.authenticate(request.headers)
+    ctx = authenticate(request)
     try:
         body = await request.json()
     except Exception:
@@ -279,12 +344,12 @@ async def decide_via_slack(approval_id: str, request: Request):
 # ---------------------------------------------------------------- audit + health
 def _require_audit_role(ctx):
     if ctx["role"] not in ctx["audit_roles"]:
-        raise AuthError(403, "Your role may not read audit data")
+        raise AuthError(403, "Your role may not read audit data", log=False)
 
 
 @app.get("/audit/verify")
 async def audit_verify(request: Request):
-    ctx = identity.authenticate(request.headers)
+    ctx = authenticate(request)
     _require_audit_role(ctx)
     return await asyncio.to_thread(audit.verify_chain)
 

@@ -36,6 +36,7 @@ DEFAULT_BLOCKED_FUNCTIONS = (
 )
 
 MAX_DEPTH = 8
+MAX_SQL_CHARS = 100_000
 
 
 class _TooDeep(Exception):
@@ -158,6 +159,8 @@ class PayloadInspector:
     def _inspect_sql(cls, sql, dialect, blocked=()):
         if not isinstance(sql, str) or not sql.strip():
             return _verdict("deny", "Fail-closed: missing or non-string SQL", "Unknown")
+        if len(sql) > MAX_SQL_CHARS:
+            return _verdict("deny", "Fail-closed: SQL too long to inspect safely", "Oversized SQL")
         try:
             statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
         except Exception as exc:

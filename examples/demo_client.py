@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: PolyForm-Shield-1.0.0
-"""End-to-end demo against a running gateway:  python examples/demo_client.py [base_url]   (needs: pip install httpx)"""
+"""End-to-end demo against a running gateway (needs: pip install httpx)
+
+    python examples/demo_client.py [base_url]            full output
+    python examples/demo_client.py --short [base_url]    one line per step (good for recording a GIF)
+"""
 import re
 import sys
+import time
 
 import httpx
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+BASE = ARGS[0] if ARGS else "http://127.0.0.1:8000"
+SHORT = "--short" in sys.argv
+GREEN, RED, RESET = ("\033[32m", "\033[31m", "\033[0m") if sys.stdout.isatty() else ("", "", "")
 INTERN, MANAGER, CTO = "demo-intern-token", "demo-manager-token", "demo-cto-token"
 HDR = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 failures = []
@@ -22,7 +30,15 @@ def call(token, tool, args):
 
 
 def step(title, out, ok):
-    print(f"\n--- {'PASS' if ok else 'FAIL'}: {title}\n{out}")
+    label = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
+    if SHORT:
+        print(f"  {label}  {title}", flush=True)
+        if not ok:
+            print(f"        got: {out}")
+        if sys.stdout.isatty():
+            time.sleep(0.5)          # readable pacing when recording
+    else:
+        print(f"\n--- {label}: {title}\n{out}")
     if not ok:
         failures.append(title)
 
@@ -35,6 +51,8 @@ def text_of(out):
     return out.get("result", {}).get("content", [{}])[0].get("text", "")
 
 
+if SHORT:
+    print("\nSovereignMCP demo: an intern's AI assistant, with the gateway in front\n")
 names = [t["name"] for t in rpc(INTERN, "tools/list")["result"]["tools"]]
 step("1. Intern's tool list hides delete_database", names, "delete_database" not in names and "read_metrics" in names)
 out = call(INTERN, "read_metrics", {})
@@ -69,8 +87,19 @@ step("13. Intern repeats the same call (executes once)", out, "EXECUTED" in text
 out = call(INTERN, "run_sql", q2)
 step("14. Repeat again (needs a fresh approval)", out, "NOT EXECUTED" in text_of(out))
 
-r = httpx.get(f"{BASE}/audit/verify", headers={"Authorization": f"Bearer {MANAGER}"})
-step("15. Audit chain verifies", r.json(), r.json().get("valid") is True)
+out = rpc(INTERN, "resources/read", {"uri": "file:///etc/passwd"})
+step("15. Unlisted protocol method (resources/read) is denied by default", out, "error" in out and out["error"]["code"] == -32001)
 
-print("\n" + ("ALL STEPS PASSED" if not failures else f"{len(failures)} STEP(S) FAILED: {failures}"))
+dup = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"update_user","arguments":{"role":"admin","role":"viewer"}}}'
+r = httpx.post(f"{BASE}/mcp", headers={**HDR, "Authorization": f"Bearer {INTERN}"}, content=dup, timeout=30)
+step("16. Ambiguous JSON (duplicate keys) is rejected", (r.status_code, r.text), r.status_code == 400)
+
+r = httpx.post(f"{BASE}/mcp", headers={**HDR, "Authorization": f"Bearer {INTERN}", "Mcp-Session-Id": "someone-elses-session"},
+               json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, timeout=30)
+step("17. A session id that was not issued to you is refused", (r.status_code, r.text), r.status_code == 404)
+
+r = httpx.get(f"{BASE}/audit/verify", headers={"Authorization": f"Bearer {MANAGER}"})
+step("18. Audit chain verifies", r.json(), r.json().get("valid") is True)
+
+print("\n" + (f"{GREEN}ALL STEPS PASSED{RESET}" if not failures else f"{RED}{len(failures)} STEP(S) FAILED: {failures}{RESET}"))
 sys.exit(1 if failures else 0)

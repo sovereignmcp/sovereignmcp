@@ -56,6 +56,9 @@ class InspectorTests(unittest.TestCase):
         deep = {"a": {"a": {"a": {"a": {"a": {"a": {"a": {"a": {"a": {"a": 1}}}}}}}}}}
         self.assertEqual(inspect("update_user", deep), "deny")                                     # too deep -> fail closed
 
+    def test_oversized_sql_is_refused_before_parsing(self):
+        self.assertEqual(inspect("run_sql", {"query": "SELECT " + "1," * 200000 + "1"}), "deny")
+
     def test_tool_level_approval(self):
         self.assertEqual(inspect("delete_database", {}), "approve")
 
